@@ -6,6 +6,9 @@ const server = http.createServer(app);
 const {TinkoffInvestApi, Helpers} = require('tinkoff-invest-api');
 const Stratagies = require("./Stratagies/Stratagies");
 const {OrderType, OrderDirection} = require("tinkoff-invest-api/cjs/generated/orders");
+const {StopOrderDirection, StopOrderExpirationType, StopOrderType} = require("tinkoff-invest-api/cjs/generated/stoporders");
+
+
 
 require('dotenv').config();
 
@@ -14,11 +17,18 @@ const api = new TinkoffInvestApi({token: process.env.TOKEN});
 let accountID;
 let orderState = '';
 let globalOrderID = '';
+let curInstrument = process.env.GAZPROM;
+let profitOrderId = '';
+let lossOrderId = '';
 
 
 async function getUserInfo() {
     const {accounts} = await api.users.getAccounts({});
     accountID = accounts[0].id;
+}
+
+async function timeout(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function covertDirection(direction) {
@@ -49,7 +59,6 @@ function covertOrderState(state) {
 async function checkOrderState() {
     const res = await api.orders.getOrderState({accountId: accountID, orderId: globalOrderID});
     orderState = covertOrderState(res.executionReportStatus);
-    console.log(orderState);
 }
 
 
@@ -82,6 +91,41 @@ function getAveragePrice(averagePricesArr, curPrice) {
     return sum / averagePricesArr.length;
 }
 
+async function stopOrder(stopPrice, orderType, amountOfLots) {
+    const response = await api.stoporders.postStopOrder({
+        figi: curInstrument,
+        quantity: amountOfLots,
+        price: Helpers.toQuotation(stopPrice.toFixed(2)),
+        stopPrice: Helpers.toQuotation(stopPrice.toFixed(2)),
+        direction: StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+        accountId: accountID,
+        expirationType: StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+        stopOrderType: orderType
+    })
+    if(orderType === 1) {
+        profitOrderId = response.stopOrderId;
+    } else {
+        lossOrderId = response.stopOrderId;
+    }
+    console.log(`Стоп ордера назначены: ${response}. Стоп цена: ${stopPrice}`)
+}
+
+async function getAmountStopOrders() {
+    const interval = setInterval(async () => {
+        const response = await api.stoporders.getStopOrders({accountId: accountID});
+        const stopOrdersArr = response.stopOrders.filter(order => {
+            if(order.stopOrderId === profitOrderId || order.stopOrderId === lossOrderId) {
+                return order
+            }
+        })
+        console.log(`Количество стоп-ордеров: ${stopOrdersArr.length}`);
+        if(stopOrdersArr.length < 2) {
+            clearInterval(interval);
+            main();
+        }
+    }, 3000)
+
+}
 
 
 async function main() {
@@ -96,7 +140,7 @@ async function main() {
     let amountOfLots = 0;
     let averagePricesArr = [];
     let averagePrice = 0;
-    let curInstrument = process.env.SBER;
+
 
     const unsubscribe = await api.stream.market.candles({
         instruments: [
@@ -113,7 +157,14 @@ async function main() {
             if(orderState !== 'Исполнена') {
                 return
             } else {
+                console.log('ЗАЯВКА ИСПОЛНЕНА')
                 orderState = '';
+                const profitPrice = averagePrice * 1.001;
+                const lossPrice = averagePrice * 0.998;
+                await stopOrder(profitPrice, StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT, amountOfLots);
+                await stopOrder(lossPrice, StopOrderType.STOP_ORDER_TYPE_STOP_LOSS, amountOfLots);
+                getAmountStopOrders();
+                await api.stream.market.cancel();
             }
         }
         if (msgCount > 3) {
@@ -121,20 +172,20 @@ async function main() {
             curOperation = Stratagies.BarUpDown(allCandles[indexOfArrOFCandles - 1].close, allCandles[indexOfArrOFCandles].open, allCandles[indexOfArrOFCandles - 2].close, lastOperation);
             let curPrice = candle.close.units + candle.close.nano / 1000000000;
             let lastPrice = lastUnit + lastNano / 1000000000;
-            if (averagePrice * 1.002 < curPrice && amountOfLots > 0) {
-                await buySellInstr(OrderDirection.ORDER_DIRECTION_SELL, curInstrument, candle.close.nano, candle.close.units, amountOfLots);
-                amountOfLots = 0;
-                lastOperation = 'sell';
-                averagePrice = 0;
-                averagePricesArr = [];
-                return;
-            } else if(curPrice < averagePrice * 0.999 && amountOfLots > 0) {
-                await buySellInstr(OrderDirection.ORDER_DIRECTION_BUY, curInstrument, candle.close.nano, candle.close.units, 1);
-                averagePrice = getAveragePrice(averagePricesArr, curPrice);
-                amountOfLots += 1;
-                lastOperation = 'buy';
-                return;
-            }
+            // if (averagePrice * 1.002 < curPrice && amountOfLots > 0) {
+            //     await buySellInstr(OrderDirection.ORDER_DIRECTION_SELL, curInstrument, candle.close.nano, candle.close.units, amountOfLots);
+            //     amountOfLots = 0;
+            //     lastOperation = 'sell';
+            //     averagePrice = 0;
+            //     averagePricesArr = [];
+            //     return;
+            // } else if(curPrice < averagePrice * 0.999 && amountOfLots > 0) {
+            //     await buySellInstr(OrderDirection.ORDER_DIRECTION_BUY, curInstrument, candle.close.nano, candle.close.units, 1);
+            //     averagePrice = getAveragePrice(averagePricesArr, curPrice);
+            //     amountOfLots += 1;
+            //     lastOperation = 'buy';
+            //     return;
+            // }
             console.log(`Текущая цена: ${curPrice}; Цена последней покупки: ${averagePrice}`)
             switch (curOperation) {
                 case "buy":
@@ -164,6 +215,7 @@ async function main() {
 }
 
 main()
+
 
 
 server.listen(9000, () => {
