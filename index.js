@@ -12,7 +12,7 @@ const {StopOrderDirection, StopOrderExpirationType, StopOrderType} = require("ti
 
 require('dotenv').config();
 
-const api = new TinkoffInvestApi({token: process.env.TOKEN});
+const api = new TinkoffInvestApi({token: process.env.SAND_TOKEN});
 
 let accountID;
 let orderState = '';
@@ -20,6 +20,15 @@ let globalOrderID = '';
 let curInstrument = process.env.GAZPROM;
 let profitOrderId = '';
 let lossOrderId = '';
+
+//Sandbox хуита
+let sandboxAccountId;
+
+async function createSandBoxAcc() {
+    sandboxAccountId = await api.sandbox.openSandboxAccount({});
+    const balance = await api.sandbox.sandboxPayIn({accountId: sandboxAccountId, amount: {currency: 'RUB', nano: 0, units: 10000}})
+    console.log(balance);
+}
 
 
 async function getUserInfo() {
@@ -214,8 +223,8 @@ async function main() {
 
 }
 
-main()
-
+// main()
+createSandBoxAcc();
 
 
 server.listen(9000, () => {
